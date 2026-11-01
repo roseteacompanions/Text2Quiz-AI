@@ -48,7 +48,7 @@ def call_gemini(prompt):
         
         # Using a reliable free model
         response = client.models.generate_content(
-            model="gemini-3.8-flash",
+            model="gemini-3.6-flash",
             contents=f"{SYSTEM_PROMPT}\n\n---\n\nUser request:\n{prompt}"
         )
         return response.text
