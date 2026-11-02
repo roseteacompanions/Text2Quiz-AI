@@ -54,6 +54,10 @@ def call_gemini(prompt):
         )
         return response.text
     except Exception as e:
+        error_text = str(e).lower()
+        # Detect quota / rate limit errors
+        if any(word in error_text for word in ["429", "resource_exhausted", "quota", "rate limit", "exceeded"]):
+            return "QUOTA_REACHED"
         return f"ERROR: {str(e)}"
 
 def parse_json(text):
@@ -68,6 +72,23 @@ def parse_json(text):
         return json.loads(text)
     except:
         return None
+
+def show_quota_message():
+    st.warning("### High demand right now")
+    st.markdown("""
+Many students are using **Text2Quiz AI** at the moment, so the free daily limit has been reached.
+
+This is **temporary**. The limit usually resets in a few hours (often overnight).
+
+**What you can do:**
+- Come back later and continue from where you left off
+- Download any quiz pack you already completed so you don’t lose progress
+- Review the concepts you already practiced
+
+You’re doing the right thing by practicing.  
+See you soon — keep going, you’re making progress.
+    """)
+    st.info("Tip: Uploading one chapter at a time and choosing 8–12 questions helps everyone get more practice.")
 
 # ====================== SESSION STATE ======================
 defaults = {
@@ -148,7 +169,6 @@ if st.session_state.source_text and not st.session_state.quiz_started and not st
     if action == "Interactive Quiz (Practice or Exam)":
         st.subheader("Quiz Settings")
 
-        # Analyze chapter button
         if not st.session_state.chapter_analyzed:
             if st.button("Analyze chapter first (recommended)", type="secondary"):
                 with st.spinner("Analyzing the chapter to find important concepts..."):
@@ -169,6 +189,9 @@ MATERIAL:
 \"\"\"
 """
                     raw = call_gemini(prompt)
+                    if raw == "QUOTA_REACHED":
+                        show_quota_message()
+                        st.stop()
                     data = parse_json(raw)
                     if data and "concepts_count" in data:
                         st.session_state.concepts_count = data.get("concepts_count", 0)
@@ -176,7 +199,7 @@ MATERIAL:
                         st.session_state.chapter_analyzed = True
                         st.rerun()
                     else:
-                        st.warning("Could not analyze the chapter properly. You can still continue.")
+                        st.warning("Could not fully analyze the chapter. You can still continue.")
                         st.session_state.chapter_analyzed = True
                         st.session_state.concepts_count = 0
                         st.rerun()
@@ -194,7 +217,7 @@ MATERIAL:
         col1, col2 = st.columns(2)
         with col1:
             mode_choice = st.radio("Mode", ["Practice (feedback after each question)", "Exam (feedback only at the end)"])
-            st.session_state.num_questions = st.slider("Number of questions", 5, 25, 12)
+            st.session_state.num_questions = st.slider("Number of questions", 5, 25, 10)
         with col2:
             st.session_state.difficulty = st.selectbox(
                 "Difficulty",
@@ -238,6 +261,9 @@ MATERIAL:
                     prompt = f"{SYSTEM_PROMPT}\n\nExplain the material in simple language for a student. Be supportive.\n\nMATERIAL:\n{st.session_state.source_text}"
 
                 result = call_gemini(prompt)
+                if result == "QUOTA_REACHED":
+                    show_quota_message()
+                    st.stop()
                 st.session_state.analysis_result = result
                 st.session_state.analysis_done = True
                 st.rerun()
@@ -254,14 +280,14 @@ if st.session_state.analysis_done:
 # ====================== GENERATE QUESTION ======================
 def generate_question():
     history = [q.get("concept", "") for q in st.session_state.questions if q.get("concept")]
-    history_text = "\n".join([f"- {h}" for h in history[-10:]]) if history else "None yet"
+    history_text = "\n".join([f"- {h}" for h in history[-8:]]) if history else "None yet"
 
     prompt = f"""
 {SYSTEM_PROMPT}
 
 SOURCE MATERIAL:
 \"\"\"
-{st.session_state.source_text[:13000]}
+{st.session_state.source_text[:12000]}
 \"\"\"
 
 Previously used concepts (avoid repeating the same way):
@@ -283,6 +309,8 @@ Return ONLY valid JSON:
 }}
 """
     raw = call_gemini(prompt)
+    if raw == "QUOTA_REACHED":
+        return "QUOTA_REACHED", raw
     data = parse_json(raw)
     return data, raw
 
@@ -292,8 +320,11 @@ if st.session_state.quiz_started and not st.session_state.finished:
     if len(st.session_state.questions) == 0:
         with st.spinner("Preparing your first question..."):
             qdata, raw = generate_question()
+            if qdata == "QUOTA_REACHED":
+                show_quota_message()
+                st.stop()
             if qdata is None:
-                st.error("Could not generate a question. Please try again shortly.")
+                st.error("Could not generate a question right now. Please try again in a moment.")
                 if st.button("Try again"):
                     st.rerun()
                 st.stop()
@@ -304,8 +335,11 @@ if st.session_state.quiz_started and not st.session_state.finished:
         len(st.session_state.questions) < st.session_state.num_questions):
         with st.spinner("Preparing next question..."):
             qdata, raw = generate_question()
+            if qdata == "QUOTA_REACHED":
+                show_quota_message()
+                st.stop()
             if qdata is None:
-                st.warning("Could not generate more questions.")
+                st.warning("Could not generate more questions right now.")
                 st.session_state.finished = True
                 st.rerun()
             else:
@@ -430,7 +464,7 @@ if st.session_state.finished:
     if st.session_state.concepts_count > 0:
         remaining = max(0, st.session_state.concepts_count - unique_covered)
         if remaining > 0:
-            st.info(f"There are still approximately **{remaining}** concepts from this chapter that were not fully covered yet.\n\nYou can load the same chapter again and do another short quiz to continue.")
+            st.info(f"There are still approximately **{remaining}** concepts from this chapter that were not fully covered yet.\n\nYou can load the same chapter again later and continue.")
         else:
             st.success("You have covered most of the important concepts from this chapter. Well done!")
 
