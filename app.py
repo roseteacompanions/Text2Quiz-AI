@@ -6,15 +6,17 @@ import tempfile
 import os
 import json
 import re
+from datetime import datetime
 
 # ====================== SYSTEM PROMPT ======================
 SYSTEM_PROMPT = """
-You are Text2Quiz AI, an expert educational agent.
+You are Text2Quiz AI, a warm and supportive educational agent.
 Rules:
 1. Use ONLY the provided source material. Never invent facts.
-2. Respect the requested question types and difficulty.
-3. Avoid unnecessary repetition.
-4. Always return clean valid JSON when asked for a question.
+2. Be encouraging. Many students feel discouraged — help them rebuild confidence.
+3. When generating questions, respect the requested types and difficulty.
+4. Avoid unnecessary repetition of the same concept.
+5. Always return clean valid JSON when asked.
 """
 
 # ====================== HELPERS ======================
@@ -75,12 +77,15 @@ defaults = {
     "analysis_result": "",
     "mode": "practice",
     "question_types": ["multiple_choice"],
-    "num_questions": 10,
+    "num_questions": 12,
     "difficulty": "Mixed (recommended)",
     "questions": [],
     "current_index": 0,
     "user_answers": {},
     "finished": False,
+    "concepts_count": 0,
+    "concepts_list": [],
+    "chapter_analyzed": False,
 }
 
 for k, v in defaults.items():
@@ -88,17 +93,22 @@ for k, v in defaults.items():
         st.session_state[k] = v
 
 # ====================== PAGE ======================
-st.set_page_config(page_title="Text2Quiz AI", page_icon="📝", layout="centered")
+st.set_page_config(page_title="Text2Quiz AI", page_icon="📚", layout="centered")
 st.title("Text2Quiz AI")
-st.caption("For students and teachers")
+st.caption("Free for students and teachers")
 
-# ====================== 1. LOAD MATERIAL ======================
+# Warm welcome
+if not st.session_state.source_text and not st.session_state.quiz_started:
+    st.info("Many students feel stuck no matter how hard they try. This free tool was made to help you turn that around — one concept at a time.")
+
+# ====================== 1. LOAD CHAPTER ======================
 if not st.session_state.source_text:
-    st.header("Step 1 – Load your material")
-    text_input = st.text_area("Paste text here", height=150)
+    st.header("Step 1 – Load one chapter")
+    st.caption("Tip: Upload one chapter at a time for the best results.")
+    text_input = st.text_area("Paste text here", height=140)
     uploaded_file = st.file_uploader("Or upload PDF / Word", type=["pdf", "docx", "txt"])
 
-    if st.button("Load Material", type="primary"):
+    if st.button("Load Chapter", type="primary"):
         source = text_input.strip() if text_input else ""
         if uploaded_file:
             file_text = extract_text_from_file(uploaded_file)
@@ -111,10 +121,17 @@ if not st.session_state.source_text:
             st.warning("Please provide more content.")
         else:
             st.session_state.source_text = source[:35000]
-            st.success("Material loaded successfully!")
+            st.session_state.chapter_analyzed = False
+            st.session_state.concepts_count = 0
+            st.session_state.concepts_list = []
+            st.session_state.questions = []
+            st.session_state.user_answers = {}
+            st.session_state.current_index = 0
+            st.session_state.finished = False
+            st.success("Chapter loaded!")
             st.rerun()
 
-# ====================== 2. CHOOSE ACTION ======================
+# ====================== 2. MAIN MENU ======================
 if st.session_state.source_text and not st.session_state.quiz_started and not st.session_state.analysis_done:
     st.header("Step 2 – What do you want to do?")
 
@@ -131,21 +148,64 @@ if st.session_state.source_text and not st.session_state.quiz_started and not st
     if action == "Interactive Quiz (Practice or Exam)":
         st.subheader("Quiz Settings")
 
+        # Analyze chapter button
+        if not st.session_state.chapter_analyzed:
+            if st.button("Analyze chapter first (recommended)", type="secondary"):
+                with st.spinner("Analyzing the chapter to find important concepts..."):
+                    prompt = f"""
+{SYSTEM_PROMPT}
+
+Analyze the following educational material and extract the main important concepts that a student should learn.
+
+Return ONLY valid JSON in this format:
+{{
+  "concepts_count": 18,
+  "concepts": ["concept 1", "concept 2", "concept 3"]
+}}
+
+MATERIAL:
+\"\"\"
+{st.session_state.source_text[:14000]}
+\"\"\"
+"""
+                    raw = call_gemini(prompt)
+                    data = parse_json(raw)
+                    if data and "concepts_count" in data:
+                        st.session_state.concepts_count = data.get("concepts_count", 0)
+                        st.session_state.concepts_list = data.get("concepts", [])
+                        st.session_state.chapter_analyzed = True
+                        st.rerun()
+                    else:
+                        st.warning("Could not analyze the chapter properly. You can still continue.")
+                        st.session_state.chapter_analyzed = True
+                        st.session_state.concepts_count = 0
+                        st.rerun()
+
+        if st.session_state.chapter_analyzed:
+            if st.session_state.concepts_count > 0:
+                st.success(f"I found approximately **{st.session_state.concepts_count}** important concepts in this chapter.")
+                if st.session_state.concepts_list:
+                    with st.expander("See the main concepts"):
+                        for c in st.session_state.concepts_list[:25]:
+                            st.write(f"• {c}")
+            else:
+                st.info("Chapter ready. You can start the quiz.")
+
         col1, col2 = st.columns(2)
         with col1:
             mode_choice = st.radio("Mode", ["Practice (feedback after each question)", "Exam (feedback only at the end)"])
-            st.session_state.num_questions = st.slider("Number of questions", 5, 30, 8)
+            st.session_state.num_questions = st.slider("Number of questions", 5, 25, 12)
         with col2:
             st.session_state.difficulty = st.selectbox(
                 "Difficulty",
                 ["Easy", "Intermediate", "Difficult", "Mixed (recommended)"]
             )
 
-        st.write("**Question types** (you can choose several):")
+        st.write("**Question types**:")
         selected_types = st.multiselect(
             "Select types",
             ["Multiple Choice", "True / False", "Fill in the Blank", "Short Answer", "Matching", "Sequencing"],
-            default=["Multiple Choice", "True / False"]
+            default=["Multiple Choice", "True / False", "Short Answer"]
         )
 
         type_map = {
@@ -171,11 +231,11 @@ if st.session_state.source_text and not st.session_state.quiz_started and not st
         if st.button("Generate", type="primary"):
             with st.spinner("Working..."):
                 if "concepts" in action.lower():
-                    prompt = f"{SYSTEM_PROMPT}\n\nExtract the main concepts and give a clear short explanation for each.\n\nMATERIAL:\n{st.session_state.source_text}"
+                    prompt = f"{SYSTEM_PROMPT}\n\nExtract the main concepts and give a clear short explanation for each. Be encouraging.\n\nMATERIAL:\n{st.session_state.source_text}"
                 elif "summary" in action.lower():
                     prompt = f"{SYSTEM_PROMPT}\n\nWrite a clear structured summary suitable for students.\n\nMATERIAL:\n{st.session_state.source_text}"
                 else:
-                    prompt = f"{SYSTEM_PROMPT}\n\nExplain the material in simple language for a student.\n\nMATERIAL:\n{st.session_state.source_text}"
+                    prompt = f"{SYSTEM_PROMPT}\n\nExplain the material in simple language for a student. Be supportive.\n\nMATERIAL:\n{st.session_state.source_text}"
 
                 result = call_gemini(prompt)
                 st.session_state.analysis_result = result
@@ -194,39 +254,33 @@ if st.session_state.analysis_done:
 # ====================== GENERATE QUESTION ======================
 def generate_question():
     history = [q.get("concept", "") for q in st.session_state.questions if q.get("concept")]
-    history_text = "\n".join([f"- {h}" for h in history[-8:]]) if history else "None"
+    history_text = "\n".join([f"- {h}" for h in history[-10:]]) if history else "None yet"
 
     prompt = f"""
 {SYSTEM_PROMPT}
 
 SOURCE MATERIAL:
 \"\"\"
-{st.session_state.source_text[:12000]}
+{st.session_state.source_text[:13000]}
 \"\"\"
 
-Previously used concepts (do not repeat the same way):
+Previously used concepts (avoid repeating the same way):
 {history_text}
 
-Create ONE question.
+Create ONE high-quality question.
 Allowed types: {', '.join(st.session_state.question_types)}
 Difficulty: {st.session_state.difficulty}
 
-Return ONLY a valid JSON object in this exact format:
+Return ONLY valid JSON:
 
 {{
   "type": "multiple_choice",
   "question": "Clear question here",
   "options": ["A) option1", "B) option2", "C) option3", "D) option4"],
   "correct": "B",
-  "explanation": "Short explanation",
+  "explanation": "Short encouraging explanation",
   "concept": "short concept name"
 }}
-
-Rules:
-- true_false → options: ["True", "False"]
-- fill_blank or short_answer → options: []
-- matching → put items in options
-- sequencing → put steps in options
 """
     raw = call_gemini(prompt)
     data = parse_json(raw)
@@ -235,23 +289,20 @@ Rules:
 # ====================== QUIZ ======================
 if st.session_state.quiz_started and not st.session_state.finished:
 
-    # Generate first question if needed
     if len(st.session_state.questions) == 0:
-        with st.spinner("Generating the first question... please wait"):
+        with st.spinner("Preparing your first question..."):
             qdata, raw = generate_question()
             if qdata is None:
-                st.error("Failed to generate the first question.")
-                st.code(raw)
+                st.error("Could not generate a question. Please try again shortly.")
                 if st.button("Try again"):
                     st.rerun()
                 st.stop()
             st.session_state.questions.append(qdata)
             st.rerun()
 
-    # Generate next question when needed
     if (st.session_state.current_index >= len(st.session_state.questions) and 
         len(st.session_state.questions) < st.session_state.num_questions):
-        with st.spinner("Generating next question..."):
+        with st.spinner("Preparing next question..."):
             qdata, raw = generate_question()
             if qdata is None:
                 st.warning("Could not generate more questions.")
@@ -270,10 +321,8 @@ if st.session_state.quiz_started and not st.session_state.finished:
 
     st.markdown(f"### Question {idx + 1} of {st.session_state.num_questions}")
     st.caption(f"Type: {q.get('type', '').replace('_', ' ').title()} | Mode: {st.session_state.mode.title()}")
-    st.write(q.get("question", "No question text"))
-    st.write("")
+    st.write(q.get("question", ""))
 
-    # Answer slot
     qtype = q.get("type", "multiple_choice")
     current_answer = st.session_state.user_answers.get(idx)
 
@@ -302,7 +351,6 @@ if st.session_state.quiz_started and not st.session_state.finished:
 
     st.write("")
 
-    # Navigation
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
@@ -326,10 +374,13 @@ if st.session_state.quiz_started and not st.session_state.finished:
             if qtype == "multiple_choice" and ")" in given:
                 given = given.split(")")[0].strip().lower()
 
-            if correct in given or given in correct or given == correct:
-                st.success("Correct!\n\n" + str(q.get("explanation", "")))
+            is_correct = correct in given or given in correct or given == correct
+
+            if is_correct:
+                st.success("Nice work! You’re getting this.\n\n" + str(q.get("explanation", "")))
             else:
-                st.error(f"Incorrect.\nCorrect answer: {q.get('correct')}\n\n{q.get('explanation', '')}")
+                st.error("Not quite yet — but this is how real learning happens.\n\nCorrect answer: " + 
+                         str(q.get("correct", "")) + "\n\n" + str(q.get("explanation", "")))
 
     with col4:
         if st.button("Finish Quiz", type="primary"):
@@ -338,10 +389,11 @@ if st.session_state.quiz_started and not st.session_state.finished:
 
 # ====================== RESULTS ======================
 if st.session_state.finished:
-    st.header("Final Results")
+    st.header("Your Results")
 
     total = len(st.session_state.questions)
     score = 0
+    covered_concepts = []
     wrong_concepts = []
 
     for i, q in enumerate(st.session_state.questions):
@@ -351,27 +403,56 @@ if st.session_state.finished:
             given = given.split(")")[0].strip().lower()
 
         is_correct = correct in given or given in correct or given == correct
+        concept = q.get("concept", "")
         if is_correct:
             score += 1
-        elif q.get("concept"):
-            wrong_concepts.append(q["concept"])
+            if concept:
+                covered_concepts.append(concept)
+        else:
+            if concept:
+                wrong_concepts.append(concept)
 
     percent = round(score / total * 100) if total > 0 else 0
-    st.metric("Score", f"{score} / {total} ({percent}%)")
+    st.metric("Score", f"{score} / {total}  ({percent}%)")
 
     if percent >= 85:
-        st.success("Excellent work!")
+        st.success("Excellent work! You’re building real understanding.")
     elif percent >= 70:
-        st.info("Good result.")
+        st.info("Good progress. You’re getting stronger with these concepts.")
     elif percent >= 50:
-        st.warning("Some important concepts need more practice.")
+        st.warning("You’re on the way. Every attempt makes the ideas clearer.")
     else:
-        st.error("Please review the main concepts and try again.")
+        st.info("This is a starting point. Many students improve a lot after the second try. You’ve got this.")
+
+    unique_covered = len(set(covered_concepts + wrong_concepts))
+    st.write(f"You practiced **{unique_covered}** important concepts from this chapter.")
+
+    if st.session_state.concepts_count > 0:
+        remaining = max(0, st.session_state.concepts_count - unique_covered)
+        if remaining > 0:
+            st.info(f"There are still approximately **{remaining}** concepts from this chapter that were not fully covered yet.\n\nYou can load the same chapter again and do another short quiz to continue.")
+        else:
+            st.success("You have covered most of the important concepts from this chapter. Well done!")
 
     if wrong_concepts:
-        st.subheader("Where to improve")
+        st.subheader("Concepts worth reviewing a little more")
         for c in sorted(set(wrong_concepts)):
             st.write(f"• {c}")
+
+    # Download pack
+    quiz_pack = {
+        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "score": f"{score}/{total}",
+        "concepts_found": st.session_state.concepts_count,
+        "questions": st.session_state.questions,
+        "user_answers": st.session_state.user_answers
+    }
+    st.download_button(
+        label="Download this quiz pack (so you can redo it later)",
+        data=json.dumps(quiz_pack, indent=2, ensure_ascii=False),
+        file_name=f"text2quiz_pack_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+        mime="application/json"
+    )
 
     with st.expander("Review all questions"):
         for i, q in enumerate(st.session_state.questions):
