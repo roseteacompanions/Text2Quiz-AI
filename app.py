@@ -6,17 +6,16 @@ import tempfile
 import os
 import json
 import re
-import random
 
 # ====================== SYSTEM PROMPT ======================
 SYSTEM_PROMPT = """
-You are Text2Quiz AI, an expert educational quiz generator.
-Strict rules:
-1. Use ONLY information from the source material. Never invent facts.
-2. Create high-quality questions that test important concepts.
-3. Avoid repeating the same concept in the same way.
-4. Vary difficulty and reasoning.
-5. Always return valid JSON in the exact format requested. No extra text.
+You are Text2Quiz AI, an expert educational agent.
+Rules:
+1. Use ONLY the provided source material. Never invent facts.
+2. When creating questions, respect the requested question types, difficulty, and number.
+3. Avoid unnecessary repetition of the same concept.
+4. Always return clean, valid JSON when asked for questions.
+5. For analysis/summary modes, be clear, structured and useful for students and teachers.
 """
 
 # ====================== HELPERS ======================
@@ -69,28 +68,34 @@ def parse_json(text):
 defaults = {
     "source_text": "",
     "quiz_started": False,
-    "mode": "practice",          # practice or exam
+    "analysis_done": False,
+    "analysis_result": "",
+    "mode": "practice",
+    "question_types": ["multiple_choice"],
+    "num_questions": 10,
+    "difficulty": "mixed",
     "current_question_data": None,
     "feedback": None,
     "score": 0,
     "total_answered": 0,
     "history": [],
-    "answers_log": [],           # for exam mode review
+    "answers_log": [],
     "finished": False,
 }
 
-for key, value in defaults.items():
-    if key not in st.session_state:
-        st.session_state[key] = value
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 # ====================== PAGE ======================
 st.set_page_config(page_title="Text2Quiz AI", page_icon="📝", layout="centered")
-st.title("Text2Quiz AI – Stage 2")
+st.title("Text2Quiz AI")
+st.caption("For students and teachers")
 
-# ====================== LOAD MATERIAL ======================
-if not st.session_state.quiz_started:
-    st.subheader("1. Load your material")
-    text_input = st.text_area("Paste text", height=160)
+# ====================== 1. LOAD MATERIAL ======================
+if not st.session_state.source_text:
+    st.header("Step 1 – Load your material")
+    text_input = st.text_area("Paste text here", height=150)
     uploaded_file = st.file_uploader("Or upload PDF / Word", type=["pdf", "docx", "txt"])
 
     if st.button("Load Material", type="primary"):
@@ -102,49 +107,111 @@ if not st.session_state.quiz_started:
             else:
                 source = (source + "\n\n" + file_text) if source else file_text
 
-        if len(source) < 80:
+        if len(source) < 60:
             st.warning("Please provide more content.")
         else:
-            st.session_state.source_text = source[:30000]
-            # reset everything
-            for k in ["quiz_started", "current_question_data", "feedback", "finished"]:
-                st.session_state[k] = False if k != "source_text" else st.session_state.source_text
+            st.session_state.source_text = source[:35000]
+            st.success("Material loaded!")
+            st.rerun()
+
+# ====================== 2. CHOOSE WHAT TO DO ======================
+if st.session_state.source_text and not st.session_state.quiz_started and not st.session_state.analysis_done:
+    st.header("Step 2 – What do you want to do?")
+
+    action = st.radio(
+        "Choose an action:",
+        [
+            "Interactive Quiz (Practice or Exam)",
+            "Extract main concepts + explanation",
+            "Create a clear summary of the material",
+            "Explain the material in simple language"
+        ]
+    )
+
+    if action == "Interactive Quiz (Practice or Exam)":
+        st.subheader("Quiz Settings")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.session_state.mode = st.radio("Mode", ["Practice (feedback after each question)", "Exam (feedback only at the end)"])
+            st.session_state.num_questions = st.slider("Number of questions", 5, 50, 10)
+
+        with col2:
+            st.session_state.difficulty = st.selectbox(
+                "Difficulty",
+                ["Easy", "Intermediate", "Difficult", "Mixed (recommended)"]
+            )
+
+        st.write("**Question types** (you can select several):")
+        types = st.multiselect(
+            "Select the types you want:",
+            [
+                "Multiple Choice",
+                "True / False",
+                "Fill in the Blank",
+                "Short Answer",
+                "Matching",
+                "Sequencing"
+            ],
+            default=["Multiple Choice", "True / False"]
+        )
+
+        # Convert to internal names
+        type_map = {
+            "Multiple Choice": "multiple_choice",
+            "True / False": "true_false",
+            "Fill in the Blank": "fill_blank",
+            "Short Answer": "short_answer",
+            "Matching": "matching",
+            "Sequencing": "sequencing"
+        }
+        st.session_state.question_types = [type_map[t] for t in types] if types else ["multiple_choice"]
+
+        if st.button("Start Interactive Quiz", type="primary"):
+            st.session_state.mode = "practice" if "Practice" in st.session_state.mode else "exam"
+            st.session_state.quiz_started = True
+            st.session_state.finished = False
             st.session_state.score = 0
             st.session_state.total_answered = 0
             st.session_state.history = []
             st.session_state.answers_log = []
             st.session_state.current_question_data = None
             st.session_state.feedback = None
-            st.session_state.finished = False
-            st.success("Material loaded successfully!")
             st.rerun()
 
-# ====================== CHOOSE MODE ======================
-if st.session_state.source_text and not st.session_state.quiz_started:
-    st.success("Material ready.")
-    mode = st.radio("Choose mode:", ["Practice Mode (feedback after each question)", "Exam Mode (feedback only at the end)"])
-    if st.button("Start Quiz", type="primary"):
-        st.session_state.mode = "practice" if "Practice" in mode else "exam"
-        st.session_state.quiz_started = True
-        st.session_state.finished = False
+    else:
+        # Analysis / Summary / Explanation modes
+        if st.button("Generate", type="primary"):
+            with st.spinner("Working..."):
+                if "concepts" in action.lower():
+                    prompt = f"{SYSTEM_PROMPT}\n\nExtract the main concepts from the material below and give a clear short explanation for each concept.\n\nMATERIAL:\n{st.session_state.source_text}"
+                elif "summary" in action.lower():
+                    prompt = f"{SYSTEM_PROMPT}\n\nWrite a clear, well-structured summary of the material below, suitable for students.\n\nMATERIAL:\n{st.session_state.source_text}"
+                else:
+                    prompt = f"{SYSTEM_PROMPT}\n\nExplain the material below in simple language so a student can easily understand it.\n\nMATERIAL:\n{st.session_state.source_text}"
+
+                result = call_gemini(prompt)
+                st.session_state.analysis_result = result
+                st.session_state.analysis_done = True
+                st.rerun()
+
+# ====================== SHOW ANALYSIS RESULT ======================
+if st.session_state.analysis_done:
+    st.header("Result")
+    st.markdown(st.session_state.analysis_result)
+    if st.button("Back to menu"):
+        st.session_state.analysis_done = False
+        st.session_state.analysis_result = ""
         st.rerun()
 
-# ====================== GENERATE QUESTION ======================
+# ====================== GENERATE ONE QUESTION ======================
 def generate_next_question():
     history_text = ""
     if st.session_state.history:
-        history_text = "Previously tested concepts (avoid repeating the same way):\n"
-        for h in st.session_state.history[-10:]:
-            history_text += f"- {h}\n"
+        history_text = "Previously used concepts (avoid repeating the same way):\n" + "\n".join([f"- {h}" for h in st.session_state.history[-12:]])
 
-    # Difficulty progression
-    n = st.session_state.total_answered
-    if n < 4:
-        difficulty = "easy (basic recall)"
-    elif n < 9:
-        difficulty = "intermediate (understanding + simple application)"
-    else:
-        difficulty = "difficult (analysis, comparison, or multi-step reasoning)"
+    types_str = ", ".join(st.session_state.question_types)
+    diff = st.session_state.difficulty
 
     prompt = f"""
 {SYSTEM_PROMPT}
@@ -156,216 +223,52 @@ SOURCE MATERIAL:
 
 {history_text}
 
-Create ONE high-quality question.
-Difficulty: {difficulty}
-Choose the best type from these options:
-- multiple_choice
-- true_false
-- fill_blank
-- short_answer
-- matching
-- sequencing
+Create ONE question.
+Allowed types: {types_str}
+Difficulty: {diff}
 
-Return ONLY this JSON format (no extra text outside the JSON):
+Return ONLY valid JSON in this format:
 
 {{
   "type": "multiple_choice",
-  "question": "Clear question text",
-  "options": ["A) option1", "B) option2", "C) option3", "D) option4"],
+  "question": "the question",
+  "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
   "correct": "B",
-  "explanation": "Short clear explanation",
+  "explanation": "short explanation",
   "concept": "short concept name"
 }}
 
-Special rules:
-- For true_false: options = ["True", "False"], correct = "True" or "False"
-- For fill_blank / short_answer: options = [], correct = the expected answer text
-- For matching: 
-  options = ["Term1 → Definition1", "Term2 → Definition2", ...] (already matched pairs for reference)
-  correct = the list of correct pairs as text
-  In the question, present the terms and definitions scrambled and ask student to match them.
-- For sequencing:
-  options = ["Step 1 text", "Step 2 text", "Step 3 text", ...]
-  correct = the correct order as numbers or text
+Rules for special types:
+- true_false → options: ["True", "False"]
+- fill_blank / short_answer → options: []
+- matching → put the pairs in options, correct = the correct matching description
+- sequencing → put the steps in options, correct = the correct order
 """
 
     raw = call_gemini(prompt)
-    data = parse_json(raw)
-    return data
+    return parse_json(raw)
 
-# ====================== QUIZ LOOP ======================
+# ====================== INTERACTIVE QUIZ ======================
 if st.session_state.quiz_started and not st.session_state.finished:
 
+    # Stop when we reach the requested number of questions
+    if st.session_state.total_answered >= st.session_state.num_questions:
+        st.session_state.finished = True
+        st.rerun()
+
     if st.session_state.current_question_data is None:
-        with st.spinner("Generating next question..."):
+        with st.spinner("Generating question..."):
             qdata = generate_next_question()
-            if qdata is None:
-                st.error("Could not generate a valid question. Please try again or restart.")
+            if not qdata:
+                st.error("Failed to generate question. Try again.")
                 st.stop()
             st.session_state.current_question_data = qdata
             st.session_state.feedback = None
 
     q = st.session_state.current_question_data
-    st.markdown(f"### Question {st.session_state.total_answered + 1}")
-    st.caption(f"Type: {q.get('type', '').replace('_', ' ').title()} | Mode: {st.session_state.mode.title()}")
+    st.markdown(f"### Question {st.session_state.total_answered + 1} of {st.session_state.num_questions}")
+    st.caption(f"Type: {q.get('type', '').replace('_', ' ').title()} | Difficulty: {st.session_state.difficulty}")
+
     st.write(q["question"])
 
     user_answer = None
-
-    # ---------- INPUT WIDGETS ----------
-    qtype = q.get("type", "multiple_choice")
-
-    if qtype == "multiple_choice":
-        options = q.get("options", [])
-        user_answer = st.radio("Select your answer:", options, key=f"ans_{st.session_state.total_answered}")
-
-    elif qtype == "true_false":
-        user_answer = st.radio("Select:", ["True", "False"], key=f"ans_{st.session_state.total_answered}")
-
-    elif qtype in ["fill_blank", "short_answer"]:
-        user_answer = st.text_input("Type your answer:", key=f"ans_{st.session_state.total_answered}")
-
-    elif qtype == "matching":
-        st.info("Matching question – use the dropdowns to match items.")
-        # Simple matching UI with selectboxes
-        options = q.get("options", [])
-        if options:
-            st.write("Possible pairs (for reference):")
-            for opt in options:
-                st.write(f"- {opt}")
-        user_answer = st.text_area("Write your matches (example: Term1 → DefinitionX, Term2 → DefinitionY)", key=f"ans_{st.session_state.total_answered}")
-
-    elif qtype == "sequencing":
-        st.info("Sequencing question – put the steps in the correct order.")
-        options = q.get("options", [])
-        if options:
-            st.write("Steps (scrambled):")
-            for i, opt in enumerate(options, 1):
-                st.write(f"{i}. {opt}")
-        user_answer = st.text_input("Write the correct order (example: 3,1,4,2 or the full sequence)", key=f"ans_{st.session_state.total_answered}")
-
-    else:
-        user_answer = st.text_input("Your answer:", key=f"ans_{st.session_state.total_answered}")
-
-    # ---------- BUTTONS ----------
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        if st.button("Submit Answer", type="primary"):
-            if not user_answer or str(user_answer).strip() == "":
-                st.warning("Please provide an answer.")
-            else:
-                correct = str(q.get("correct", "")).strip().lower()
-                given = str(user_answer).strip().lower()
-
-                # Better checking for multiple choice
-                if qtype == "multiple_choice" and ")" in given:
-                    given_letter = given.split(")")[0].strip().lower()
-                    is_correct = given_letter == correct or correct in given
-                else:
-                    is_correct = correct in given or given in correct or given == correct
-
-                st.session_state.total_answered += 1
-                if is_correct:
-                    st.session_state.score += 1
-
-                # Save for exam review
-                st.session_state.answers_log.append({
-                    "question": q["question"],
-                    "your_answer": user_answer,
-                    "correct": q.get("correct"),
-                    "explanation": q.get("explanation", ""),
-                    "is_correct": is_correct,
-                    "concept": q.get("concept", "")
-                })
-
-                st.session_state.history.append(q.get("concept", q["question"][:50]))
-
-                if st.session_state.mode == "practice":
-                    if is_correct:
-                        st.session_state.feedback = ("correct", q.get("explanation", "Correct!"))
-                    else:
-                        st.session_state.feedback = ("wrong", f"Incorrect.\n\nCorrect answer: {q.get('correct')}\n\n{q.get('explanation', '')}")
-                else:
-                    # Exam mode – just move on
-                    st.session_state.current_question_data = None
-                    st.session_state.feedback = None
-
-                st.rerun()
-
-    with col2:
-        if st.button("Next Question"):
-            st.session_state.current_question_data = None
-            st.session_state.feedback = None
-            st.rerun()
-
-    with col3:
-        if st.button("Finish & See Results"):
-            st.session_state.finished = True
-            st.rerun()
-
-    # Show feedback only in Practice mode
-    if st.session_state.feedback and st.session_state.mode == "practice":
-        kind, msg = st.session_state.feedback
-        if kind == "correct":
-            st.success(msg)
-        else:
-            st.error(msg)
-
-# ====================== RESULTS ======================
-if st.session_state.finished:
-    st.header("Final Results")
-    total = st.session_state.total_answered
-    score = st.session_state.score
-
-    if total == 0:
-        st.write("No questions were answered.")
-    else:
-        percent = round((score / total) * 100)
-        st.metric("Your Score", f"{score} / {total}   ({percent}%)")
-
-        st.subheader("Performance Summary")
-        if percent >= 85:
-            st.success("Excellent! You have a strong grasp of the material.")
-        elif percent >= 70:
-            st.info("Good work. A few concepts need more attention.")
-        elif percent >= 50:
-            st.warning("You understand parts of the material, but significant improvement is needed.")
-        else:
-            st.error("You need to review the core concepts carefully and try again.")
-
-        # Show where to improve
-        st.subheader("Where to improve")
-        wrong_concepts = [a["concept"] for a in st.session_state.answers_log if not a["is_correct"] and a["concept"]]
-        if wrong_concepts:
-            st.write("Focus on these concepts:")
-            for c in set(wrong_concepts):
-                st.write(f"- {c}")
-        else:
-            st.write("Great job — almost no weak areas detected!")
-
-        # Detailed review (especially useful in Exam mode)
-        with st.expander("See detailed review of all questions"):
-            for i, a in enumerate(st.session_state.answers_log, 1):
-                st.markdown(f"**Q{i}:** {a['question']}")
-                st.write(f"Your answer: {a['your_answer']}")
-                st.write(f"Correct answer: {a['correct']}")
-                if a["explanation"]:
-                    st.write(f"Explanation: {a['explanation']}")
-                st.write("---")
-
-    if st.button("Restart with same material"):
-        st.session_state.quiz_started = False
-        st.session_state.current_question_data = None
-        st.session_state.feedback = None
-        st.session_state.score = 0
-        st.session_state.total_answered = 0
-        st.session_state.history = []
-        st.session_state.answers_log = []
-        st.session_state.finished = False
-        st.rerun()
-
-    if st.button("Load new material"):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.rerun()
