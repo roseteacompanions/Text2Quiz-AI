@@ -47,7 +47,7 @@ def call_gemini(prompt):
         api_key = st.secrets["GEMINI_API_KEY"]
         client = genai.Client(api_key=api_key)
         response = client.models.generate_content(
-            model="gemini-3.6-flash",
+            model="gemini-flash-latest",
             contents=prompt
         )
         return response.text
