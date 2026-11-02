@@ -1,3 +1,4 @@
+
 import streamlit as st
 from google import genai
 from pypdf import PdfReader
@@ -12,9 +13,9 @@ SYSTEM_PROMPT = """
 You are Text2Quiz AI, an expert educational agent.
 Rules:
 1. Use ONLY the provided source material. Never invent facts.
-2. Respect the requested question types, difficulty and number of questions.
+2. Respect the requested question types and difficulty.
 3. Avoid unnecessary repetition.
-4. Return clean valid JSON when generating questions.
+4. Always return clean valid JSON when asked for a question.
 """
 
 # ====================== HELPERS ======================
@@ -56,11 +57,16 @@ def call_gemini(prompt):
 
 def parse_json(text):
     try:
+        # Clean common markdown
+        text = text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\n?", "", text)
+            text = re.sub(r"\n?```$", "", text)
         match = re.search(r'\{.*\}', text, re.DOTALL)
         if match:
             return json.loads(match.group())
         return json.loads(text)
-    except:
+    except Exception as e:
         return None
 
 # ====================== SESSION STATE ======================
@@ -73,10 +79,9 @@ defaults = {
     "question_types": ["multiple_choice"],
     "num_questions": 10,
     "difficulty": "Mixed (recommended)",
-    "questions": [],          # list of all generated questions
-    "current_index": 0,       # which question we are on
-    "user_answers": {},       # index → answer
-    "score": 0,
+    "questions": [],
+    "current_index": 0,
+    "user_answers": {},
     "finished": False,
 }
 
@@ -100,65 +105,3 @@ if not st.session_state.source_text:
         if uploaded_file:
             file_text = extract_text_from_file(uploaded_file)
             if file_text.startswith("Error"):
-                st.error(file_text)
-            else:
-                source = (source + "\n\n" + file_text) if source else file_text
-
-        if len(source) < 60:
-            st.warning("Please provide more content.")
-        else:
-            st.session_state.source_text = source[:35000]
-            st.success("Material loaded!")
-            st.rerun()
-
-# ====================== 2. CHOOSE ACTION ======================
-if st.session_state.source_text and not st.session_state.quiz_started and not st.session_state.analysis_done:
-    st.header("Step 2 – What do you want to do?")
-
-    action = st.radio(
-        "Choose an action:",
-        [
-            "Interactive Quiz (Practice or Exam)",
-            "Extract main concepts + explanation",
-            "Create a clear summary",
-            "Explain the material in simple language"
-        ]
-    )
-
-    if action == "Interactive Quiz (Practice or Exam)":
-        st.subheader("Quiz Settings")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            mode_choice = st.radio("Mode", ["Practice (feedback after each question)", "Exam (feedback only at the end)"])
-            st.session_state.num_questions = st.slider("Number of questions", 5, 40, 10)
-        with col2:
-            st.session_state.difficulty = st.selectbox(
-                "Difficulty",
-                ["Easy", "Intermediate", "Difficult", "Mixed (recommended)"]
-            )
-
-        st.write("**Question types** (select one or more):")
-        selected_types = st.multiselect(
-            "Types",
-            ["Multiple Choice", "True / False", "Fill in the Blank", "Short Answer", "Matching", "Sequencing"],
-            default=["Multiple Choice", "True / False"]
-        )
-
-        type_map = {
-            "Multiple Choice": "multiple_choice",
-            "True / False": "true_false",
-            "Fill in the Blank": "fill_blank",
-            "Short Answer": "short_answer",
-            "Matching": "matching",
-            "Sequencing": "sequencing"
-        }
-        st.session_state.question_types = [type_map[t] for t in selected_types] if selected_types else ["multiple_choice"]
-
-        if st.button("Start Interactive Quiz", type="primary"):
-            st.session_state.mode = "practice" if "Practice" in mode_choice else "exam"
-            st.session_state.quiz_started = True
-            st.session_state.finished = False
-            st.session_state.questions = []
-            st.session_state.current_index = 0
-            st.session_state.user_answers = {}
